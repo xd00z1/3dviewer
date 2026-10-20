@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Swelling Timeline Viewer</title>
+  <style>
+    :root {
+      --bg: #1b1d21;
+      --panel: #23262b;
+      --border: #3a3e45;
+      --text: #e6e6e6;
+      --muted: #9aa0a6;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; overflow: hidden; }
+    #app { display: flex; flex-direction: column; height: 100%; }
+    header { display: flex; align-items: center; gap: 12px; padding: 8px 16px;
+      border-bottom: 1px solid var(--border); background: var(--panel); flex-wrap: wrap; }
+    header h1 { font-size: 15px; font-weight: 600; margin: 0; flex: 1; }
+    header button, header label { font: inherit; font-size: 13px; color: var(--text); }
+    header button { background: #33373e; border: 1px solid var(--border); border-radius: 6px;
+      padding: 5px 10px; cursor: pointer; }
+    header button:hover { background: #3d424a; }
+    #views { flex: 1; display: grid; grid-template-columns: 1fr 1fr; min-height: 0; }
+    .view { position: relative; min-width: 0; min-height: 0; }
+    .view + .view { border-left: 1px solid var(--border); }
+    .view canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+    .label { position: absolute; top: 10px; left: 12px; padding: 4px 10px; border-radius: 6px;
+      background: rgba(0,0,0,.55); font-size: 14px; font-weight: 600; pointer-events: none; }
+    .status { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      color: var(--muted); font-size: 14px; text-align: center; padding: 16px; pointer-events: none; }
+    @media (max-width: 700px), (orientation: portrait) {
+      #views { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+      .view + .view { border-left: 0; border-top: 1px solid var(--border); }
+    }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Swelling Timeline Viewer</h1>
+    <label><input type="checkbox" id="wire"> Wireframe</label>
+    <button id="front">Front</button>
+    <button id="left">Left</button>
+    <button id="right">Right</button>
+    <button id="reset">Reset view</button>
+  </header>
+  <div id="views">
+    <div class="view" id="viewA"><canvas></canvas><div class="label"></div><div class="status">Loading…</div></div>
+    <div class="view" id="viewB"><canvas></canvas><div class="label"></div><div class="status">Loading…</div></div>
+  </div>
+</div>
+
+<script type="module">
+// ============================================================
+//  CONFIG — edit these to point at your two scans.
+// ============================================================
+const CONFIG = {
+  // .ply or .stl both work (format is picked from the extension).
+  left:  { file: 'models/before.ply', label: 'Day 0' },
+  right: { file: 'models/after.ply',  label: 'Day 14' },
+
+  // 'shared'   : both meshes are shifted by the SAME offset (taken from the left
+  //              model), so their relative position is preserved. Use this when the
+  //              scans were captured/registered in the same coordinate frame —
+  //              which is what you want for judging swelling.
+  // 'separate' : each mesh is centred on its own bounding box. Use only if the
+  //              scans are in unrelated coordinate frames (alignment will then be
+  //              approximate and swelling itself shifts the bbox centre).
+  centering: 'shared',
+
+  // Rotation (degrees) applied to both meshes, for scans whose "up" isn't +Y.
+  // e.g. many scanners export Z-up: use { x: -90, y: 0, z: 0 }.
+  rotation: { x: 0, y: 0, z: 0 },
+
+  // Initial view direction (from the face toward the camera). +Z = looking at the front.
+  frontDirection: [0, 0, 1],
+
+  color: 0xd9b8a0,            // used when the file has no vertex colours
+  useVertexColors: true,      // show scanned skin texture/colour if the PLY has it
+  smoothShading: true,
+};
+// ============================================================
+
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
+
+const solidMat = new THREE.MeshStandardMaterial({
+  color: CONFIG.color, roughness: 0.65, metalness: 0.0, side: THREE.DoubleSide,
+});
+const colorMat = new THREE.MeshStandardMaterial({
+  vertexColors: true, roughness: 0.75, metalness: 0.0, side: THREE.DoubleSide,
+});
+const pointMat = new THREE.PointsMaterial({ size: 1, sizeAttenuation: false, vertexColors: true });
+const materials = [solidMat, colorMat];
+
+function makeView(el, label) {
+  const canvas = el.querySelector('canvas');
+  el.querySelector('.label').textContent = label;
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setClearColor(0x2a2d33);
+
+  const scene = new THREE.Scene();
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 0.9));
+
+  const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 10000);
+  // Headlight: follows the camera so lighting is identical in both views.
+  const headlight = new THREE.DirectionalLight(0xffffff, 1.6);
+  headlight.position.set(0.3, 0.4, 1);
+  camera.add(headlight);
+  camera.add(headlight.target);
+  scene.add(camera);
+
+  const controls = new OrbitControls(camera, canvas);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.12;
+  controls.screenSpacePanning = true;
+
+  return { el, renderer, scene, camera, controls, status: el.querySelector('.status'), mesh: null };
+}
+
+const views = [
+  makeView(document.getElementById('viewA'), CONFIG.left.label),
+  makeView(document.getElementById('viewB'), CONFIG.right.label),
+];
+
+// ---- Camera sync -------------------------------------------------------
+// Only the view the user last touched runs its controls; its camera state is
+// then copied verbatim to the other view, so rotation/zoom/pan always match.
+let active = views[0];
+for (const v of views) {
+  v.controls.addEventListener('start', () => { active = v; });
+}
+
+function syncFrom(src) {
+  for (const dst of views) {
+    if (dst === src) continue;
+    dst.camera.position.copy(src.camera.position);
+    dst.camera.quaternion.copy(src.camera.quaternion);
+    dst.camera.zoom = src.camera.zoom;
+    dst.camera.updateProjectionMatrix();
+    dst.controls.target.copy(src.controls.target);
+  }
+}
+
+// ---- Loading -----------------------------------------------------------
+const loaders = { stl: new STLLoader(), ply: new PLYLoader() };
+const load = (url) => new Promise((resolve, reject) => {
+  const ext = url.split('?')[0].split('.').pop().toLowerCase();
+  const loader = loaders[ext];
+  if (!loader) return reject(new Error(`Unsupported file type: .${ext}`));
+  loader.load(url, (geo) => { geo.userData.format = ext; resolve(geo); }, undefined, reject);
+});
+
+function prepGeometry(geo) {
+  const r = CONFIG.rotation, d = THREE.MathUtils.degToRad;
+  geo.applyMatrix4(new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(d(r.x), d(r.y), d(r.z))));
+  // A PLY with no face list is a raw point cloud.
+  const isPointCloud = geo.userData.format === 'ply' && !geo.index;
+  if (geo.index) {
+    // PLY with faces: vertices are already shared.
+    if (!geo.attributes.normal || CONFIG.smoothShading) geo.computeVertexNormals();
+  } else if (!isPointCloud && CONFIG.smoothShading) {
+    // STL: triangle soup — weld duplicate vertices so normals can be smoothed.
+    geo.deleteAttribute('normal');
+    geo = mergeVertices(geo, 1e-4);
+    geo.userData.format = 'stl';
+    geo.computeVertexNormals();
+  }
+  geo.userData.isPointCloud = isPointCloud;
+  geo.computeBoundingBox();
+  geo.computeBoundingSphere();
+  return geo;
+}
+
+let homeRadius = 100;
+const home = new THREE.Vector3();
+
+function setView(dir) {
+  const v = active;
+  const d = new THREE.Vector3(...dir).normalize();
+  const dist = homeRadius / Math.sin(THREE.MathUtils.degToRad(v.camera.fov / 2)) * 1.15;
+  v.controls.target.copy(home);
+  v.camera.position.copy(home).addScaledVector(d, dist);
+  v.camera.up.set(0, 1, 0);
+  v.camera.lookAt(home);
+  v.controls.update();
+  syncFrom(v);
+}
+
+async function init() {
+  const results = await Promise.allSettled([load(CONFIG.left.file), load(CONFIG.right.file)]);
+  const geos = results.map((r, i) => {
+    const v = views[i];
+    if (r.status === 'rejected') {
+      const file = i === 0 ? CONFIG.left.file : CONFIG.right.file;
+      v.status.textContent = `Could not load ${file}`;
+      console.error(r.reason);
+      return null;
+    }
+    v.status.remove();
+    return prepGeometry(r.value);
+  });
+
+  const ref = geos.find(Boolean);
+  if (!ref) return;
+  const sharedCenter = ref.boundingBox.getCenter(new THREE.Vector3());
+
+  geos.forEach((geo, i) => {
+    if (!geo) return;
+    const c = CONFIG.centering === 'separate' ? geo.boundingBox.getCenter(new THREE.Vector3()) : sharedCenter;
+    geo.translate(-c.x, -c.y, -c.z);
+    geo.computeBoundingSphere();
+    const hasColor = CONFIG.useVertexColors && !!geo.attributes.color;
+    const mesh = geo.userData.isPointCloud
+      ? new THREE.Points(geo, pointMat)
+      : new THREE.Mesh(geo, hasColor ? colorMat : solidMat);
+    views[i].scene.add(mesh);
+    views[i].mesh = mesh;
+  });
+
+  homeRadius = Math.max(...geos.filter(Boolean).map(g => g.boundingSphere.radius));
+  for (const v of views) {
+    v.camera.near = homeRadius / 100;
+    v.camera.far = homeRadius * 100;
+    v.camera.updateProjectionMatrix();
+    v.controls.minDistance = homeRadius * 0.05;
+    v.controls.maxDistance = homeRadius * 20;
+  }
+  setView(CONFIG.frontDirection);
+}
+
+// ---- UI ----------------------------------------------------------------
+const f = CONFIG.frontDirection;
+document.getElementById('front').onclick = () => setView(f);
+// Left/right = rotate the front direction ±90° about the up axis.
+document.getElementById('left').onclick  = () => setView([-f[2], f[1],  f[0]]);
+document.getElementById('right').onclick = () => setView([ f[2], f[1], -f[0]]);
+document.getElementById('reset').onclick = () => setView(f);
+document.getElementById('wire').onchange = (e) => { for (const m of materials) m.wireframe = e.target.checked; };
+
+// ---- Render loop -------------------------------------------------------
+function resize() {
+  for (const v of views) {
+    const w = v.el.clientWidth, h = v.el.clientHeight;
+    if (!w || !h) continue;
+    v.renderer.setSize(w, h, false);
+    v.camera.aspect = w / h;
+    v.camera.updateProjectionMatrix();
+  }
+}
+new ResizeObserver(resize).observe(document.getElementById('views'));
+resize();
+
+function tick() {
+  active.controls.update();
+  syncFrom(active);
+  for (const v of views) v.renderer.render(v.scene, v.camera);
+  requestAnimationFrame(tick);
+}
+tick();
+init();
+</script>
+</body>
+</html>
