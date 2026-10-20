@@ -24,11 +24,17 @@ pick the branch and `/ (root)` → Save. The site appears at
 
 ## Notes
 
-- **Alignment.** Both meshes are shifted by the *same* offset, so their relative
-  position from the scanner is preserved. If your two scans were captured in different
-  coordinate frames, register them first (CloudCompare: *Tools → Registration → Fine
-  registration (ICP)*, or MeshLab *Align*), then export both. Otherwise the side-by-side
-  comparison is misleading.
+- **Alignment.** Phone scans (e.g. Heges) are stored relative to the phone, so two
+  sessions never line up on their own. `models/after.ply` has already been rigidly aligned
+  onto `models/before.ply` (rotation + translation only, shape untouched; face residual
+  median ≈1.8 mm). To add or replace a scan, align it the same way:
+
+      pip install numpy scipy
+      python3 tools/align_ply.py models/before.ply path/to/new_scan.ply models/after.ply
+
+  The viewer then shifts both meshes by the *same* offset, preserving that alignment.
+- **Framing.** `focus` in `CONFIG` sets the point the camera orbits and how much it frames
+  (scan units, mm). It's set to the face; delete it to frame the whole scan.
 - **Up axis.** If the face shows up lying down, set `rotation: { x: -90, y: 0, z: 0 }` in `CONFIG`.
 - **File size.** GitHub refuses files over 100 MB and warns above 50 MB. Decimate large
   scans (MeshLab: *Quadric Edge Collapse Decimation*) to ~200k–500k faces. A face needs no more than that.

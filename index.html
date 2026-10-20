@@ -67,8 +67,8 @@
 // ============================================================
 const CONFIG = {
   // .ply or .stl both work (format is picked from the extension).
-  left:  { file: 'models/before.ply', label: 'Day 0' },
-  right: { file: 'models/after.ply',  label: 'Day 14' },
+  left:  { file: 'models/before.ply', label: 'May 1, 2026' },
+  right: { file: 'models/after.ply',  label: 'Oct 18, 2026' },
 
   // 'shared'   : both meshes are shifted by the SAME offset (taken from the left
   //              model), so their relative position is preserved. Use this when the
@@ -78,6 +78,11 @@ const CONFIG = {
   //              scans are in unrelated coordinate frames (alignment will then be
   //              approximate and swelling itself shifts the bbox centre).
   centering: 'shared',
+
+  // Optional: what the camera orbits around and how much it frames, in the scans'
+  // own units (mm here). Without it the whole scan's bounding box is used, which
+  // for head-and-shoulders scans frames the torso instead of the face.
+  focus: { center: [22, 25, -320], radius: 165 },
 
   // Rotation (degrees) applied to both meshes, for scans whose "up" isn't +Y.
   // e.g. many scanners export Z-up: use { x: -90, y: 0, z: 0 }.
@@ -234,6 +239,11 @@ async function init() {
   });
 
   homeRadius = Math.max(...geos.filter(Boolean).map(g => g.boundingSphere.radius));
+  if (CONFIG.focus) {
+    home.fromArray(CONFIG.focus.center);
+    if (CONFIG.centering !== 'separate') home.sub(sharedCenter);
+    homeRadius = CONFIG.focus.radius;
+  }
   for (const v of views) {
     v.camera.near = homeRadius / 100;
     v.camera.far = homeRadius * 100;
